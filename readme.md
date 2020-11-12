@@ -12,14 +12,16 @@ For IEEE 754, the storage format is as shown in the figure below. The highest bi
 
 ```
 single precision : 
-					|31|30 ··· 23|22 ··· 0|
-					|s |   exp   |  frac  |
+		|31|30 ··· 23|22 ··· 0|
+		|s |   exp   |  frac  |
 ```
 
 IEEE float has a feature that expect fot the highest sign bit, the weight of the value increases from 0 to 30. These bits are sorted in the same way as 32-bit unsigned integers after preprocessing. 
+
 The preprocessing of the sign bit is as follows: 
  - Positive float: The highest sign bit is inverted (from 0 to 1).
  - Negative float: All bits are inverted, so the radix sort of integers can be applied.
+ 
  After converting the floating-point number to an integers format, performing bit operations on it for sorting, and then converting after the sorting is completed.
 
 
@@ -33,9 +35,11 @@ Radix sort scans all the data to be sorted in each iteration, and divides the it
 
 
 ## Parallel Merge Lists
+
 After parallel radix sort, we get ordered lists with the number of threads (128). For the serial merge method, we select the smallest number from each ordered list and insert it into a new list each time. Therefore, we also need an array list_index to record the current pointer position of each list.
 
 Compared with serial merging, parallel merging first finds the minimum value in each list through parallel reduction. Parallel reduction uses half of the number of threads to compare the element of the current thread with element of corresponding thread, and transfer the smaller value to the previous thread. After each comparison, the number of active threads is reduced by half until only one thread remains, and the element corresponding to this thread is the minimun value.
+
 In order to facilitate communication between threads, shared memory is used to record the current pointer position of each thread and the minimum value corresponding to the pointer. Finally, the thread with thread number 0 writes the minimum value to the new list.
 
 
