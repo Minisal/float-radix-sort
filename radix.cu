@@ -1,21 +1,20 @@
-#include<iostream>
-#include<sys/time.h>
-#include<math.h>
-#include<cuda_runtime.h>
+#include <iostream>
+#include <cuda_runtime.h>
+#include <fstream>
+#include <algorithm>
+#include <math.h>
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <strings.h>
+#include <sys/time.h>
 #include"device_launch_parameters.h" 
-#include<fstream>
+
 #define MAX_NUM_LISTS 256
 
 using namespace std;
-int num_data = 100000000; // the number of the data
+int num_data = 10000; // the number of the data
 int num_lists = 128; // the number of parallel threads
-
-__device__ void radix_sort(float* const data_0, float* const data_1, \
-    int num_lists, int num_data, int tid); 
-__device__ void merge_list(const float* src_data, float* const dest_list, \
-    int num_lists, int num_data, int tid); 
-__device__ void preprocess_float(float* const data, int num_lists, int num_data, int tid);
-__device__ void Aeprocess_float(float* const data, int num_lists, int num_data, int tid);
 
 unsigned GetTickCount()
 {
@@ -24,9 +23,77 @@ unsigned GetTickCount()
     return tv.tv_sec*1000+tv.tv_usec/1000;
 }
 
+__device__ void radix_sort(float* const data_0, float* const data_1, \
+    int num_lists, int num_data, int tid); 
+__device__ void merge_list(const float* src_data, float* const dst_list, \
+    int num_lists, int num_data, int tid); 
+__device__ void preprocess_float(float* const data, int num_lists, int num_data, int tid);
+__device__ void Aeprocess_float(float* const data, int num_lists, int num_data, int tid);
+
+
+// CPU implementation of Radix Sort
+void radix_sort(float *a, int n) {
+    float *t = (float *)malloc(sizeof(float)*n);
+    int bitLength = sizeof(float) * 8;
+    int count[2];
+    int pref[2];
+    int mask = 1;
+    int negatives = 0, positives = 0;
+    unsigned int b;
+    union ufi {
+     float f;
+     int i;
+    } u; 
+
+    for (int shift = 0; shift < bitLength; shift++) {
+    
+        for (int i = 0; i < 2; i++)
+            count[i] = 0;
+
+        
+        for (int i = 0; i < n; i++) {
+         
+            u.f = a[i];
+            b = (u.i >> shift) & mask; 
+
+            count[b]++;
+
+
+            if (shift == 0 && a[i] < 0)
+                negatives++;
+        }
+        if (shift == 0) positives = n - negatives;
+
+        
+        pref[0] = 0;
+        for (int i = 1; i < 2; i++)
+            pref[i] = pref[i - 1] + count[i - 1];
+
+       
+        for (int i = 0; i < n; i++) {
+            
+            u.f = a[i];
+            b = (u.i >> shift) & mask;
+         
+            int index = pref[b]++;
+
+            
+            if (shift == bitLength - 1)
+            {
+                if (a[i] < 0)
+                    index = positives - (index - negatives) - 1;
+                else
+                    index += negatives;
+            }
+            t[index] = a[i];
+        }
+        memcpy( a, t, sizeof(float) * n );
+    }
+    free(t);
+}
 
 // GPU implementation of Radix Sort
-__global__ void GPU_radix_sort(float* const src_data, float* const dest_data, \
+__global__ void GPU_radix_sort(float* const src_data, float* const dst_data, \
     int num_lists, int num_data) 
 {
     int tid = blockIdx.x*blockDim.x + threadIdx.x;
@@ -34,11 +101,11 @@ __global__ void GPU_radix_sort(float* const src_data, float* const dest_data, \
     preprocess_float(src_data, num_lists, num_data, tid); 
     __syncthreads();
     // no shared memory
-    radix_sort(src_data, dest_data, num_lists, num_data, tid);
+    radix_sort(src_data, dst_data, num_lists, num_data, tid);
     __syncthreads();
-    merge_list(src_data, dest_data, num_lists, num_data, tid);    
+    merge_list(src_data, dst_data, num_lists, num_data, tid);    
     __syncthreads();
-    Aeprocess_float(dest_data, num_lists, num_data, tid);
+    Aeprocess_float(dst_data, num_lists, num_data, tid);
     __syncthreads();
 }
 
@@ -134,7 +201,7 @@ __device__ void radix_sort(float* const data_0, float* const data_1, \
         compares from bottom to top, conveying smaller values to root.)
 
 */
-__device__ void merge_list(const float* src_data, float* const dest_list, \
+__device__ void merge_list(const float* src_data, float* const dst_list, \
     int num_lists, int num_data, int tid) 
 {
     // The amount of data processed by each thread = the number of data in the ordered list
@@ -221,17 +288,17 @@ __device__ void merge_list(const float* src_data, float* const dest_list, \
             // Pointer to the list +1
             list_index[record_tid[0]]++;
             // Writes the minimun value to the new list
-            dest_list[i] = record_val[0]; 
+            dst_list[i] = record_val[0]; 
         }
         __syncthreads();
     }
 }
 
-int cmp(const void*a, const void*b){ return *(int*)a-*(int*)b; }
+
 int main(void)
 {
-    float *data = new float[num_data];
-    float  *src_data, *dest_data;
+    float *data = new float[num_data], *result_CPU = new float[num_data], *result_GPU = new float[num_data];
+    float  *src_data, *dst_data;
     for(int i =0;i<num_data;i++)
     {
         data[i] = (float)rand()/double(RAND_MAX);
@@ -246,22 +313,44 @@ int main(void)
     cout<<"number of data:"<<num_data<<endl;
 
     // test GPU sorting
-    unsigned start, end;
     
-    start = GetTickCount();
+    float elapsed = 0;
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
     cudaMalloc((void**)&src_data, sizeof(float)*num_data);
-    cudaMalloc((void**)&dest_data, sizeof(float)*num_data);
+    cudaMalloc((void**)&dst_data, sizeof(float)*num_data);
     cudaMemcpy(src_data, data, sizeof(float)*num_data, cudaMemcpyHostToDevice); 
-    GPU_radix_sort<<<1,num_lists>>>(src_data, dest_data, num_lists, num_data);   
-    cudaMemcpy(data, dest_data, sizeof(float)*num_data, cudaMemcpyDeviceToHost);
-    end = GetTickCount();
-    cout<<"GPU SORT:"<<(float(end-start))/1000<<"s"<<endl;
+
+    cudaEventRecord(start);
+    GPU_radix_sort<<<1,num_lists>>>(src_data, dst_data, num_lists, num_data); 
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&elapsed,start,stop);
+
+    cudaMemcpy(result_GPU, dst_data, sizeof(float)*num_data, cudaMemcpyDeviceToHost);
     
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    cout<<"GPU SORT:"<<(unsigned)elapsed<<"ms"<<endl;
+    //cout<<"data"<<endl;
+    //for(int i=0; i<num_data; i++) cout<<data[i]<<" "; cout<<endl;
+    //cout<<"result_GPU"<<endl;
+    //for(int i=0; i<num_data; i++) cout<<result_GPU[i]<<" "; cout<<endl;
+
+
     //test CPU sorting
-    start = GetTickCount();
-    qsort(data, num_data, sizeof(float), cmp);
-    end = GetTickCount();
-    cout<<"CPU SORT:"<<(float(end-start))/1000<<"s"<<endl;
+    unsigned start_t, end_t;
+
+    start_t = GetTickCount();
+    radix_sort(data,num_data);
+    end_t = GetTickCount();
+    cout<<"CPU SORT:"<<end_t-start_t<<"ms"<<endl;
+    //cout<<"result_CPU"<<endl;
+    //for(int i=0; i<num_data; i++) cout<<data[i]<<" "; cout<<endl;
 
     return 0;
 }
